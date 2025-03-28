@@ -1,4 +1,4 @@
-# batsrus-userproblems
+# BATS-R-US user problems for Hot Jupiters
 
 User problems to use with the [BATS-R-US](https://github.com/SWMFsoftware/BATSRUS)
 code, version 9.20 (release 2018). Problems encompass single-fluid, multi-species radiation-(M)HD and multi-fluid radiation-(M)HD setups.
