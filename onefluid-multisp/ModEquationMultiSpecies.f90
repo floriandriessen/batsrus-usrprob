@@ -10,6 +10,9 @@ module ModVarIndexes
 
   save
 
+  character(len=*), parameter :: &
+       NameEquationFile = 'ModEquationMultiSpecies.f90'
+
   ! This equation module contains the multi-species MHD equations for a planet
   ! with an atmosphere consisting of ions (H+) and neutrals (H).
   ! NOTE: BATSRUS is only aware of ions in multi-species, to account for the

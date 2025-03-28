@@ -8,31 +8,19 @@
 ! speaking this is not a multi-species model for BATSRUS as multi-species =
 ! multiple ion species. The correct inclusion of neutrals is in this ModUser.
 !
-! Calculating tau by interpolating neutral density to a uniform 3D grid. Each
-! processor implements a portion of the grid, then in ModBatsrusMethods.f90 I
-! sum the contribution of each processor into a master grid of densities, which
-! are then used to sum along x to get tau(x,y,z). This uniform grid of tau is
-! then interpolated back to the AMR grid in calc_sources.
-! The forces (Coriolis and tidal) and the input stellar wind as implemented by
-! Stephen Carolan
+! For photo-ionisation the optical depth is calculated by interpolating the
+! neutral hydrogen density onto a uniform 3D grid. This is done at the end of
+! each iteration so that the updated optical depth can be used in the next
+! iteration source term computation.
+! The external forces (Coriolis and tidal) and the input stellar wind were
+! implemented by Stephen Carolan.
 !
-! HISTORY (AAV, SC)
-! 19 Jan 2021 : fixed issue that code is not working correctly after restart
-!               (although I don't understand why...)
-! 22 Feb 2021 : Optimising way to read the SW coefficients, to reduce number of
-!               open/read/close wind.dat files.
-! 19 Mar 2021 : implementing passive scalar. AAV
-! 26 Mar 2021 : editing the sources for passive scalar.
-! 22 Apr 2021 : adding collisional cooling / collisional ionisation
-! 21 May 2021 : adding new variables for plotting
-! 10 Jun 2021 : changing the resolution of the interpolated grid
-! 03 Jun 2022 : (re)incorporating magnetic field
-!
-! HISTORY (FLO)
-!   Dec 2022 : major formatting, display, and deletion of unused code
+! HISTORY
+!   Dec 2022 : major formatting and deletion of unused code in Carolan version
 !   Jan 2023 : bugfix in the treatment of ion and neutral species; neutrals
 !              have to be handled in ModUser for correct body values
-!   Sep 2023 : standardise code following other versions for thesis student
+!   Sep 2023 : standardise user code for master thesis student
+!   Nov 2024 : update user code to latest version of BATSRUS
 !==============================================================================
 module ModUser
 
@@ -45,20 +33,16 @@ module ModUser
        IMPLEMENTED5  => user_set_face_boundary, &
        IMPLEMENTED6  => user_set_cell_boundary, &
        IMPLEMENTED7  => user_set_ics,           &
-       IMPLEMENTED8  => user_calc_sources,      &
+       IMPLEMENTED8  => user_calc_sources_expl, &
        IMPLEMENTED9  => user_set_plot_var,      &
        IMPLEMENTED10 => user_action,            &
-       IMPLEMENTED11 => user_get_log_var,       &
-       IMPLEMENTED12 => user_update_states
+       IMPLEMENTED11 => user_update_states
 
   ! List of public methods
   include 'user_module.h'
 
-  ! Make public in order to add to ModBatsrusMethods
-  public :: create_uniform_3d_grid_tau
-
-  real,              parameter :: VersionUserModule = 6.0
-  character (len=*), parameter :: NameUserModule = &
+  character(len=*), parameter :: NameUserFile = 'ModUserMultiSpecies.f90'
+  character(len=*), parameter :: NameUserModule = &
        'Multi-species (M)HD simulation for extrasolar gas giants'
 
   ! Orbital properties planet
@@ -100,13 +84,12 @@ module ModUser
 
   ! Interpolation grid: use even numbers to avoid interpolation to fall in xyz
   ! in-between 2 blocks
-  integer, parameter :: size_3d_i=200, size_3d_j=200, size_3d_k=128
-  real               :: x_array(size_3d_i),y_array(size_3d_j),z_array(size_3d_k)
-  real               :: array_3d_dens_plot(size_3d_i,size_3d_j,size_3d_k)
+  integer, parameter :: nRadGridX=200, nRadGridY=200, nRadGridZ=128
+  real :: RadGridX_C(nRadGridX), RadGridY_C(nRadGridY), RadGridZ_C(nRadGridZ)
 
   ! Optical depth related: public so can be added to modBatsrusMethods
-  real, public :: array_3d_dens(size_3d_i, size_3d_j, size_3d_k)=0.0
-  real, public :: array_3d_Exp_mTau(size_3d_i, size_3d_j, size_3d_k)=1.0
+  real, public :: RhoRadGrid_C(nRadGridX, nRadGridY, nRadGridZ)=0.0
+  real, public :: ExpTauRadGrid_C(nRadGridX, nRadGridY, nRadGridZ)=1.0
 
   ! Neutral specie properties
   real, parameter :: BodyNNeuSpeciesDim = 2.39e11, MassNeuSpecies = 1.0
@@ -283,8 +266,8 @@ contains
   end subroutine user_normalization
 
 !==============================================================================
-! Initialize new global variables to be used within a session. This routine is
-! read at the first iteration and after a restart.
+! Initialise new global variables to be used within a session. This routine is
+! read at the first iteration and after a IsRestart.
 !==============================================================================
   subroutine user_init_session
 
@@ -293,8 +276,8 @@ contains
     use ModPhysics,    ONLY: Si2No_V, Io2No_V, No2Io_V, UnitX_, UnitU_, &
          UnitN_,  UnitB_, UnitTemperature_, UnitEnergyDens_, UnitMass_, &
          UnitT_, mSun, BodyRho_I, BodyP_I, BodyTDim_I, FaceState_VI
-    use ModConst,      ONLY: cGravitation, cAU, cSecondPerYear, cSecondPerDay,&
-         cEV, cErg
+    use ModConst,      ONLY: cGravitation, cSecondPerYear, cSecondPerDay, &
+         cAU, cEV, cErg
     use ModNumConst,   ONLY: cPi
 
     implicit none
@@ -303,10 +286,6 @@ contains
     character(len=*), parameter :: NameSub = 'user_init_session'
     !--------------------------------------------------------------------------
     call test_start(NameSub, DoTest)
-
-    !\
-    ! Deriving other initial variables
-    !/
 
     ! Stellar mass-loss rate; Msun/yr to kg/s to normalised
     MdotSw = MdotSwMsunYr * mSun / cSecondPerYear &
@@ -340,22 +319,6 @@ contains
     ! Stellar magnetic field; Gauss to normalised
     B0Star = B0StarCgs * Io2No_V(UnitB_)
 
-    ! Do correct handling of MHD mass density equation and MHD pressure by
-    ! including neutrals as separate from ions (and electrons)
-    BodyRhoNeuSpecies = BodyNNeuSpeciesDim * Io2No_V(UnitN_) * MassNeuSpecies
-    BodyPNeuSpecies   = BodyNNeuSpeciesDim * Io2No_V(UnitN_) &
-         * BodyTDim_I(1) * Io2No_V(UnitTemperature_)
-
-    ! Add neutral species on top of ion species for total fluid in body
-    BodyRho_I(1) = BodyRho_I(1) + BodyRhoNeuSpecies
-    BodyP_I(1)   = BodyP_I(1) + BodyPNeuSpecies
-
-    ! Amend body faces to account for neutral species
-    FaceState_VI(Rho_,Body1_)   = BodyRho_I(1)
-    FaceState_VI(HpRho_,Body1_) = BodyRho_I(1) - BodyRhoNeuSpecies
-    FaceState_VI(H1Rho_,Body1_) = BodyRhoNeuSpecies
-    FaceState_VI(P_,Body1_)     = BodyP_I(1)
-
     ! Numerical factors for mass-loading and collisional rate processes with
     ! proper normalisation for later use in source term computation:
     ! Photo-ionisation coefficient (1/s)
@@ -379,8 +342,24 @@ contains
     CoolLyalphaCoef = 7.5d-19 * No2Io_V(UnitN_)**2 &
          * Io2No_V(UnitEnergyDens_) / Io2No_V(UnitT_)
 
+    ! Do correct handling of MHD mass density equation and MHD pressure by
+    ! including neutrals as separate from ions (and electrons)
+    BodyRhoNeuSpecies = BodyNNeuSpeciesDim * Io2No_V(UnitN_) * MassNeuSpecies
+    BodyPNeuSpecies   = BodyNNeuSpeciesDim * Io2No_V(UnitN_) &
+         * BodyTDim_I(1) * Io2No_V(UnitTemperature_)
+
+    ! Add neutral species on top of ion species for total fluid in body
+    BodyRho_I(1) = BodyRho_I(1) + BodyRhoNeuSpecies
+    BodyP_I(1)   = BodyP_I(1) + BodyPNeuSpecies
+
+    ! Amend body faces to account for neutral species
+    FaceState_VI(Rho_,Body1_)   = BodyRho_I(1)
+    FaceState_VI(HpRho_,Body1_) = BodyRho_I(1) - BodyRhoNeuSpecies
+    FaceState_VI(H1Rho_,Body1_) = BodyRhoNeuSpecies
+    FaceState_VI(P_,Body1_)     = BodyP_I(1)
+
     ! Generate the grid for the optical depth computation
-    call make_uniform_rtgrid
+    call make_uniform_radiation_grid
 
     call test_stop(NameSub, DoTest)
 
@@ -392,30 +371,32 @@ contains
 ! the boundary face must be passed back in cartesian coordinates.
 ! Values that must be set are: Rho_, Ux_, Uy_, Uz_, p_, Bx_, By_, Bz_
 !==============================================================================
-  subroutine user_set_face_boundary(VarsGhostFace_V)
+  subroutine user_set_face_boundary(FBC)
 
-    use ModFaceBoundary, ONLY: VarsTrueFace_V
-    use ModVarIndexes,   ONLY: nVar, Rho_, HpRho_, H1Rho_, PaSc_, Ux_, Uz_, P_
-    use ModPhysics,      ONLY: BodyP_I, BodyRho_I
+    use ModMain,       ONLY: FaceBCType
+    use ModVarIndexes, ONLY: nVar, Rho_, HpRho_, H1Rho_, PaSc_, Ux_, Uz_, P_
+    use ModPhysics,    ONLY: BodyP_I, BodyRho_I
 
     implicit none
 
-    real, intent(out) :: VarsGhostFace_V(nVar)
+    type(FaceBCType) :: FBC
+    character(len=*), parameter:: NameSub = 'user_set_face_boundary'
+    !--------------------------------------------------------------------------
 
     ! By default apply floating condition to all state variables
-    VarsGhostFace_V = VarsTrueFace_V
+    FBC%VarsGhostFace_V = FBC%VarsTrueFace_V
 
     ! Fix mass density and pressure to the respective body value
-    VarsGhostFace_V(Rho_)   = BodyRho_I(1)
-    VarsGhostFace_V(HpRho_) = BodyRho_I(1) - BodyRhoNeuSpecies
-    VarsGhostFace_V(H1Rho_) = BodyRhoNeuSpecies
-    VarsGhostFace_V(P_)     = BodyP_I(1)
+    FBC%VarsGhostFace_V(Rho_)   = BodyRho_I(1)
+    FBC%VarsGhostFace_V(HpRho_) = BodyRho_I(1) - BodyRhoNeuSpecies
+    FBC%VarsGhostFace_V(H1Rho_) = BodyRhoNeuSpecies
+    FBC%VarsGhostFace_V(P_)     = BodyP_I(1)
 
     ! Passive scalar for planetary outflow
-    VarsGhostFace_V(PaSc_) = pScalarPw * VarsGhostFace_V(Rho_)
+    FBC%VarsGhostFace_V(PaSc_) = pScalarPw * FBC%VarsGhostFace_V(Rho_)
 
     ! Change sign for velocities to force 0 velocity at the boundary
-    VarsGhostFace_V(Ux_:Uz_) = -VarsTrueFace_V(Ux_:Uz_)
+    FBC%VarsGhostFace_V(Ux_:Uz_) = -FBC%VarsTrueFace_V(Ux_:Uz_)
 
   end subroutine user_set_face_boundary
 
@@ -629,13 +610,13 @@ contains
 
 !==============================================================================
 ! Calculates the initial conditions of the grid for the planetary wind outflow.
-! After a restart, this subroutine will not be accessed.
+! After a IsRestart, this subroutine will not be accessed.
 !==============================================================================
   subroutine user_set_ics(iBlock)
 
     use ModVarIndexes, ONLY: Rho_, HpRho_, H1Rho_, PaSc_, RhoUx_, RhoUz_, P_
     use ModPhysics,    ONLY: rBody, BodyRho_I, BodyP_I, Gamma
-    use ModGeometry,   ONLY: Xyz_DGB, true_cell, r_BLK
+    use ModGeometry,   ONLY: Xyz_DGB, Used_GB, r_GB
     use ModAdvance,    ONLY: State_VGB
     use BATL_lib,      ONLY: MinI, MaxI, MinJ, MaxJ, MinK, MaxK
 
@@ -657,9 +638,9 @@ contains
       x0 = Xyz_DGB(x_,i,j,k,iBlock)
       y0 = Xyz_DGB(y_,i,j,k,iBlock)
       z0 = Xyz_DGB(z_,i,j,k,iBlock)
-      rp = r_BLK(i,j,k,iBlock)
+      rp = r_GB(i,j,k,iBlock)
 
-      if (.not.true_cell(i,j,k,iBlock) .or. rp < rBody) CYCLE
+      if (.not.Used_GB(i,j,k,iBlock) .or. rp < rBody) CYCLE
 
       ! IC of the planetary outflow (beta profile fit in python code by SC)
       Vrad = VinfPw &
@@ -688,23 +669,59 @@ contains
     enddo; enddo; enddo
 
     ! Initialising the uniform grid of densities for optical depth calculation
-    if (iBlock == 1) call init_uniform_rho_grid
+    if (iBlock == 1) call init_uniform_3d_grid_rho
 
     call test_stop(NameSub, DoTest, iBlock)
+
+  contains
+    !==========================================================================
+    ! Initialisation of radiation grid with density and optical depth that will
+    ! be used in the first instance of user_calc_sources.
+    !==========================================================================
+    subroutine init_uniform_3d_grid_rho
+
+      use ModPhysics, ONLY: rBody
+
+      implicit none
+
+      ! Local variable
+      real :: rRadGrid
+      !------------------------------------------------------------------------
+
+      do k = 1,nRadGridZ; do j = 1,nRadGridY; do i = 1,nRadGridX
+        rRadGrid = sqrt(RadGridX_C(i)**2 + RadGridY_C(j)**2 + RadGridZ_C(k)**2)
+
+        if (rRadGrid <= rBody) then
+          RhoRadGrid_C(i,j,k) = BodyRhoNeuSpecies
+          CYCLE
+        endif
+
+        Vrad = VinfPw * ( 1.0 - (1.0 - (Vrad0Pw/VinfPw)**BetaIndex) &
+             *            rBody/rRadGrid )**BetaIndex
+
+        RhoRadGrid_C(i,j,k) = BodyRhoNeuSpecies * Vrad0Pw/Vrad &
+             * (rBody/rRadGrid)**2
+      enddo; enddo; enddo
+
+      ! Create the initial grid of optical depth
+      call calc_tau_radiation_grid
+
+      ! Reset radiation grid density for next timestep
+      RhoRadGrid_C(1:nRadGridX,1:nRadGridY,1:nRadGridZ) = 0.0
+
+    end subroutine init_uniform_3d_grid_rho
 
   end subroutine user_set_ics
 
 !==============================================================================
 ! Calculate extra source terms from chemical reactions and external forces.
 !==============================================================================
-  subroutine user_calc_sources(iBlock)
+  subroutine user_calc_sources_expl(iBlock)
 
-    use ModVarIndexes,  ONLY: Rho_, HpRho_, H1Rho_, PaSc_, RhoUx_, RhoUy_, &
-         RhoUz_, P_, Energy_, MassFluid_I
-    use ModPhysics,     ONLY: No2Si_V, No2Io_V, Io2No_V, Si2No_V,    &
-         UnitRho_, UnitU_, UnitX_, UnitN_, UnitTemperature_, UnitT_, &
-         UnitEnergyDens_, mSun, rBody
-    use ModGeometry,    ONLY: Xyz_DGB, true_cell, r_BLK
+    use ModVarIndexes,  ONLY: Rho_, HpRho_, H1Rho_, RhoUx_, RhoUy_, RhoUz_, &
+         PaSc_, P_, Energy_, MassFluid_I
+    use ModPhysics,     ONLY: No2Si_V, UnitTemperature_, rBody
+    use ModGeometry,    ONLY: Xyz_DGB, Used_GB, r_GB
     use ModAdvance,     ONLY: State_VGB, Source_VC
     use ModInterpolate, ONLY: interpolate_scalar
     use ModConst,       ONLY: cKToEV
@@ -722,8 +739,8 @@ contains
     real :: PhotoIonisationRate, ElectronImpactRate, RecombinationRate, Ufrac
     real :: HeatPhotoIon, CoolLyalpha, CoolElectronImpact, ExpMinTau
 
-    logical :: DoTest, DoExtrapolate=.false.
-    character(len=*), parameter :: NameSub = 'user_calc_source'
+    logical :: DoTest
+    character(len=*), parameter:: NameSub = 'user_calc_sources_expl'
     !--------------------------------------------------------------------------
     call test_start(NameSub, DoTest, iBlock)
 
@@ -731,7 +748,7 @@ contains
     ! Atomic processes
     !******************
     do k = 1,nK; do j = 1,nJ; do i = 1,nI
-      if (.not.true_cell(i,j,k,iBlock)) CYCLE
+      if (.not.Used_GB(i,j,k,iBlock)) CYCLE
 
       ! Cell centred coordinates
       x = Xyz_DGB(x_,i,j,k,iBlock)
@@ -749,15 +766,15 @@ contains
 
         ! To find attenuation in a particular cell, interpolate exp(-tau) from
         ! uniform grid to the BATSRUS AMR grid
-        if (r_BLK(i,j,k,iBlock) <= rBody) then
+        if (r_GB(i,j,k,iBlock) <= rBody) then
           ExpMinTau = 0.0
         else
-          ExpMinTau = interpolate_scalar(array_3d_Exp_mTau(:,:,:),           &
-                                        3, [ 1, 1, 1 ],                      &
-                                        [ size_3d_i, size_3d_j, size_3d_k ], &
-                                        [ x, y, z ],                         &
-                                        x_array(:), y_array(:), z_array(:),  &
-                                        DoExtrapolate)
+          ExpMinTau = &
+               interpolate_scalar(ExpTauRadGrid_C(:,:,:), 3, [ 1, 1, 1 ],     &
+                                  [ nRadGridX, nRadGridY, nRadGridZ ],        &
+                                  [ x, y, z ],                                &
+                                  RadGridX_C(:), RadGridY_C(:), RadGridZ_C(:),&
+                                  DoExtrapolate=.true.)
         endif
 
         ! Plasma temperature in Kelvin
@@ -830,7 +847,7 @@ contains
     if (UseTidal) then
       ! NOTE: for notation convenience forces are computed per unit mass
       do k = 1,nK; do j = 1,nJ; do i = 1,nI
-        if (.not.true_cell(i,j,k,iBlock)) CYCLE
+        if (.not.Used_GB(i,j,k,iBlock)) CYCLE
 
         x = Xyz_DGB(x_,i,j,k,iBlock)
         y = Xyz_DGB(y_,i,j,k,iBlock)
@@ -867,7 +884,7 @@ contains
       ! NOTE: has only x,y component if rotation axis is along z
       !       AND does not perform fictitious work
       do k = 1,nK; do j = 1,nJ; do i = 1,nI
-        if (.not.true_cell(i,j,k,iBlock)) CYCLE
+        if (.not.Used_GB(i,j,k,iBlock)) CYCLE
 
         Source_VC(RhoUx_,i,j,k) = Source_VC(RhoUx_,i,j,k) &
              + 2.0*OmegaOrbit * State_VGB(RhoUy_,i,j,k,iBlock)
@@ -879,7 +896,7 @@ contains
 
     call test_stop(NameSub, DoTest, iBlock)
 
-  end subroutine user_calc_sources
+  end subroutine user_calc_sources_expl
 
 !==============================================================================
 ! Perform hydrodynamic update and set hydrogen mass density on radiation grid.
@@ -900,12 +917,99 @@ contains
     ! Update hydrodynamic state on each block
     call update_state_normal(iBlock)
 
-    ! Interpolate updated hydrogen mass density onto radiation grid
-    call create_uniform_3d_grid_rho(iBlock)
+    ! Interpolate updated neutral hydrogen mass density onto radiation grid
+    call interp_neutrals_to_radiation_grid(iBlock)
 
     call test_stop(NameSub, DoTest, iBlock)
 
   end subroutine user_update_states
+
+!==============================================================================
+! Perform additional manipulations at specific instances of the simulation.
+!==============================================================================
+  subroutine user_action(NameAction)
+
+    use ModMpi,   ONLY: MPI_REAL, MPI_SUM, mpi_reduce_real_array
+    use BATL_lib, ONLY: iProc, nProc, nBlock, iComm, nI, nJ, nK, MaxBlock
+
+    implicit none
+
+    character(len=*), intent(in) :: NameAction
+
+    ! Local variables
+    integer :: iBlock, iError
+
+    logical :: DoTest
+    character(len=*), parameter :: NameSub = 'user_action'
+    !--------------------------------------------------------------------------
+    call test_start(NameSub, DoTest)
+
+    select case(NameAction)
+    case('initialize module')
+      ! Allocate arrays for including in tecplot output
+      if (.not.allocated(PlotExp_mTau_CB)) then
+        allocate(PlotExp_mTau_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotHeat_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotCoolLya_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotCoolColl_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotRatePhotoIon_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotRateCollIon_CB(1:nI,1:nJ,1:nK,MaxBlock))
+        allocate(PlotRateRec_CB(1:nI,1:nJ,1:nK,MaxBlock))
+      endif
+
+    case('clean module')
+      ! At end give memory back to computer - Fortran 90 practise
+      if (allocated(PlotExp_mTau_CB))     deallocate(PlotExp_mTau_CB)
+      if (allocated(PlotHeat_CB))         deallocate(PlotHeat_CB)
+      if (allocated(PlotCoolLya_CB))      deallocate(PlotCoolLya_CB)
+      if (allocated(PlotCoolColl_CB))     deallocate(PlotCoolColl_CB)
+      if (allocated(PlotRatePhotoIon_CB)) deallocate(PlotRatePhotoIon_CB)
+      if (allocated(PlotRateCollIon_CB))  deallocate(PlotRateCollIon_CB)
+      if (allocated(PlotRateRec_CB))      deallocate(PlotRateRec_CB)
+
+    case('initial condition done')
+      ! Initialising grid of densities after startup or restart
+      do iBlock = 1,nBlock
+        call interp_neutrals_to_radiation_grid(iBlock)
+      enddo
+
+      if (nProc > 1) then
+        call mpi_reduce_real_array(RhoRadGrid_C, size(RhoRadGrid_C), &
+                                   MPI_SUM, 0, iComm, iError)
+
+        if (iProc == 0) call calc_tau_radiation_grid
+
+        call MPI_BCAST(ExpTauRadGrid_C, size(ExpTauRadGrid_C), &
+                       MPI_REAL, 0, iComm, iError)
+
+        ! Reseting for next timestep
+        RhoRadGrid_C = 0.0
+      endif
+
+    case('timestep done')
+      ! Updating the optical depth grid after each iteration
+
+      if (nProc > 1) then
+        call mpi_reduce_real_array(RhoRadGrid_C, size(RhoRadGrid_C), &
+                                   MPI_SUM, 0, iComm, iError)
+
+        if (iProc == 0) call calc_tau_radiation_grid
+
+        call MPI_BCAST(ExpTauRadGrid_C, size(ExpTauRadGrid_C), &
+                       MPI_REAL, 0, iComm, iError)
+
+        ! Reseting for next timestep
+        RhoRadGrid_C = 0.0
+      endif
+
+    case('write progress')
+      ! Output some extra model setup information
+      call print_model_info
+    end select
+
+    call test_stop(NameSub, DoTest)
+
+  end subroutine user_action
 
 !==============================================================================
 ! This subroutine used for plotting new variables with #SAVEPLOT beyond the
@@ -1031,213 +1135,6 @@ contains
   end subroutine user_set_plot_var
 
 !==============================================================================
-! Perform additional manipulations at specific instances of the simulation.
-!==============================================================================
-  subroutine user_action(NameAction)
-
-    use ModMpi,   ONLY: MPI_REAL, MPI_SUM, mpi_reduce_real_array
-    use BATL_lib, ONLY: iProc, nProc, nBlock, iComm, nI, nJ, nK, MaxBlock
-
-    implicit none
-
-    character(len=*), intent(in) :: NameAction
-
-    ! Local variables
-    integer :: iBlock, iError
-
-    logical :: DoTest
-    character(len=*), parameter :: NameSub = 'user_action'
-    !--------------------------------------------------------------------------
-    call test_start(NameSub, DoTest)
-
-    select case(NameAction)
-    case('initialize module')
-      ! Allocate arrays for including in tecplot output
-      if (.not.allocated(PlotExp_mTau_CB)) then
-        allocate(PlotExp_mTau_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotHeat_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotCoolLya_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotCoolColl_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotRatePhotoIon_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotRateCollIon_CB(1:nI,1:nJ,1:nK,MaxBlock))
-        allocate(PlotRateRec_CB(1:nI,1:nJ,1:nK,MaxBlock))
-      endif
-
-    case('clean module')
-      ! At end give memory back to computer - Fortran 90 practise
-      if (allocated(PlotExp_mTau_CB))     deallocate(PlotExp_mTau_CB)
-      if (allocated(PlotHeat_CB))         deallocate(PlotHeat_CB)
-      if (allocated(PlotCoolLya_CB))      deallocate(PlotCoolLya_CB)
-      if (allocated(PlotCoolColl_CB))     deallocate(PlotCoolColl_CB)
-      if (allocated(PlotRatePhotoIon_CB)) deallocate(PlotRatePhotoIon_CB)
-      if (allocated(PlotRateCollIon_CB))  deallocate(PlotRateCollIon_CB)
-      if (allocated(PlotRateRec_CB))      deallocate(PlotRateRec_CB)
-
-    case('initial condition done')
-      ! Initialising grid of densities after startup OR restart
-      do iBlock = 1,nBlock
-        call create_uniform_3d_grid_rho(iBlock)
-      enddo
-
-      if (nProc > 1) then
-        call mpi_reduce_real_array(array_3d_dens, size(array_3d_dens), &
-                                   MPI_SUM, 0, iComm, iError)
-
-        if (iProc == 0) call create_uniform_3d_grid_tau
-
-        call MPI_BCAST(array_3d_Exp_mTau, size(array_3d_Exp_mTau), &
-                       MPI_REAL, 0, iComm, iError)
-
-        ! Reseting for next timestep
-        array_3d_dens = 0.0
-      endif
-
-    case('write progress')
-      ! Output some extra model setup information
-      call print_model_info
-    end select
-
-    call test_stop(NameSub, DoTest)
-
-  end subroutine user_action
-
-!==============================================================================
-! This routine can add extra variables of interest to the .log file created
-! with the #SAVELOGFILE header in the PARAM.in
-!==============================================================================
-  subroutine user_get_log_var(VarValue, NameVar, Radius)
-
-    use ModMain,            ONLY: nI, nJ, nK, nBlock, Unused_B, UseB0
-    use ModAdvance,         ONLY: State_VGB, tmp1_BLK
-    use ModB0,              ONLY: B0_DGB
-    use ModVarIndexes,      ONLY: Rho_, Bx_, By_, Bz_, Ux_, Uy_, Uz_
-    use ModPhysics,         ONLY: No2Si_V, UnitX_, UnitU_, UnitMass_, UnitB_
-    use ModGeometry,        ONLY: r_BLK
-    use ModWriteLogSatFile, ONLY: calc_sphere
-    use ModNumConst,        ONLY: cPi
-    use BATL_lib,           ONLY: Xyz_DGB
-
-    real, intent(out)            :: VarValue
-    character(len=*), intent(in) :: NameVar
-    real, intent(in), optional   :: Radius
-
-    ! Local variables
-    integer :: iBlock, i, j, k
-    real    :: FullB_DG(3,0:nI+1,0:nJ+1,0:nK+1), FullV_DG(3,0:nI+1,0:nJ+1,0:nK+1)
-    real    :: xloc, yloc, rplane, Bxloc, Byloc, Brloc, Bploc
-    real    :: rholoc, vxloc, vyloc, vrloc, vploc
-
-    logical :: DoTest
-    character(len=*), parameter :: NameSub = 'user_get_log_var'
-    !--------------------------------------------------------------------------
-    call test_start(NameSub, DoTest)
-
-    VarValue = 0.0
-
-    select case(NameVar)
-    case("ubflx") ! Unsigned magnetic flux
-
-      do iBlock = 1,nBlock
-
-        if (Unused_B(iBlock)) CYCLE
-
-        FullB_DG = State_VGB(Bx_:Bz_,0:nI+1,0:nJ+1,0:nK+1,iBlock)
-
-        if (UseB0) then
-          FullB_DG = FullB_DG + B0_DGB(:,0:nI+1,0:nJ+1,0:nK+1,iBlock)
-        endif
-
-        ! Compute Br
-        do k = 0,nK+1; do j = 0,nJ+1; do i = 0,nI+1
-          tmp1_BLK(i,j,k,iBlock) = &
-               sum( FullB_DG(:,i,j,k) * Xyz_DGB(:,i,j,k,iBlock)) &
-               / r_BLK(i,j,k,iBlock )
-        enddo; enddo; enddo
-      enddo
-
-      ! To get the unsigned Br, take absolute value
-      VarValue = calc_sphere('integrate', 360, Radius, abs(tmp1_BLK))
-
-      ! Handle conversion to IO units; avoids working with UserUnit_V
-      VarValue = VarValue * ( No2Si_V(UnitB_)*No2Si_V(UnitX_)**2 )
-      ! print*, "Logfile check:", VarValue, NameVar, Radius
-
-    case('pbflx') ! Magnetic torque planet
-
-      do iBlock = 1,nBlock
-
-        if (Unused_B(iBlock)) CYCLE
-
-        FullB_DG = State_VGB(Bx_:Bz_,0:nI+1,0:nJ+1,0:nK+1,iBlock)
-
-        if (UseB0) then
-          FullB_DG = FullB_DG + B0_DGB(:,0:nI+1,0:nJ+1,0:nK+1,iBlock)
-        endif
-
-        ! Compute Br and Bphi to get magnetic torque Jdot_mag
-        do k = 0,nK+1; do j = 0,nJ+1; do i = 0,nI+1
-          Brloc = sum( FullB_DG(:,i,j,k) * Xyz_DGB(:,i,j,k,iBlock)) &
-               / r_BLK(i,j,k,iBlock )
-
-          xloc =  Xyz_DGB(x_,i,j,k,iBlock)
-          yloc =  Xyz_DGB(y_,i,j,k,iBlock)
-          rplane = sqrt( xloc**2.0 + yloc**2.0 )
-          Bxloc = FullB_DG(Bx_,i,j,k)
-          Byloc = FullB_DG(By_,i,j,k)
-
-          Bploc = (-Bxloc*yloc + Byloc*xloc) / rplane
-
-          tmp1_BLK(i,j,k,iBlock) = -rplane * Brloc * Bploc/(4.0*cPi)
-        enddo; enddo; enddo
-      enddo
-
-      VarValue = calc_sphere('integrate', 360, Radius, tmp1_BLK)
-
-      ! Handle conversion to IO units; avoids working with UserUnit_V
-      VarValue = VarValue * ( No2Si_V(UnitMass_)*No2Si_V(UnitU_)**2.0 )
-
-    case('pwflx') ! Wind material torque planet
-
-      do iBlock = 1,nBlock
-
-        if (Unused_B(iBlock)) CYCLE
-
-        FullV_DG = State_VGB(Ux_:Uz_,0:nI+1,0:nJ+1,0:nK+1,iBlock)
-
-        ! Compute vr and vphi to get wind torque Jdot_wind
-        do k = 0,nK+1; do j = 0,nJ+1; do i = 0,nI+1
-          rholoc = State_VGB(Rho_,i,j,k,iBlock)
-
-          vrloc = sum( FullV_DG(:,i,j,k) * Xyz_DGB(:,i,j,k,iBlock)) &
-               / r_BLK(i,j,k,iBlock )
-
-          xloc =  Xyz_DGB(x_,i,j,k,iBlock)
-          yloc =  Xyz_DGB(y_,i,j,k,iBlock)
-          rplane = sqrt( xloc**2.0 + yloc**2.0 )
-          vxloc = FullV_DG(Ux_,i,j,k)
-          vyloc = FullV_DG(Uy_,i,j,k)
-
-          vploc = (-vxloc*yloc + vyloc*xloc) / rplane
-
-          tmp1_BLK(i,j,k,iBlock) = rplane * rholoc * vrloc * vploc
-        enddo; enddo; enddo
-      enddo
-
-      VarValue = calc_sphere('integrate', 360, Radius, tmp1_BLK)
-
-      ! Handle conversion to IO units; avoids working with UserUnit_V
-      VarValue = VarValue * ( No2Si_V(UnitMass_)*No2Si_V(UnitU_)**2.0 )
-      !print*, "Logfile check:", VarValue, NameVar, Radius
-
-    case default
-       call stop_mpi('Unknown user logvar='//NameVar)
-    end select
-
-    call test_stop(NameSub, DoTest)
-
-  end subroutine user_get_log_var
-
-!==============================================================================
 ! Read stellar wind velocity for injection into the grid. The velocity profile
 ! is created in 1D models of polytropic winds, whose results are fitted by a
 ! 8th degree polynomial.
@@ -1255,6 +1152,7 @@ contains
     integer            :: iUnit, i, iError, line, pos
     character(len=100) :: buffer, label
     logical            :: exist=.false.
+    !--------------------------------------------------------------------------
 
     ! Return an unused unit number for extended use
     iUnit = io_unit_new()
@@ -1295,9 +1193,9 @@ contains
 ! Setup a uniform base grid for performing the ray tracing to compute the
 ! optical depth integral. To be used within the source term calculation.
 !==============================================================================
-  subroutine make_uniform_rtgrid
+  subroutine make_uniform_radiation_grid
 
-    use ModGeometry, ONLY: x1, x2, y1, y2, z1, z2
+    use ModGeometry, ONLY: xMinBox, xMaxBox, yMinBox, yMaxBox, zMinBox, zMaxBox
 
     implicit none
 
@@ -1305,119 +1203,82 @@ contains
     integer :: itemp, points_left, points_right
     real    :: res_mid, res_right, res_left
     real    :: length_mid, length_left, length_right
+    !--------------------------------------------------------------------------
 
-    ! Grid is in normalised units, but since Io2No(x_)=1, it does not matter
-
-    ! === x-axis ===
+    ! >>> x-axis <<<
     length_mid   = 2.0 - (-2.0)
-    length_left  = -2.0 - x1
-    length_right = x2 - 2.0
+    length_left  = -2.0 - xMinBox
+    length_right = xMaxBox - 2.0
 
-    points_right = int(length_right*(size_3d_i+2-41)/(length_left+length_right))
-    points_left  = size_3d_i+2-41 - points_right
+    points_right = int(length_right*(nRadGridX+2-41)/(length_left+length_right))
+    points_left  = nRadGridX+2-41 - points_right
 
-    ! 40 deltas within +/- 2, the same in all three axis
+    ! 40 deltas within +/- 2 along all three coordinate axes
     res_mid   = length_mid/(41-1)
     res_left  = length_left/(points_left-1)
     res_right = length_right/(points_right-1)
 
-    ! Generate x-grid
-    x_array(1:points_left) = &
-        (/ ( x1 + res_left*(itemp-1.0), itemp=1,points_left) /)
+    ! Generate grid
+    RadGridX_C(1:points_left) = &
+        (/ ( xMinBox + res_left*(itemp-1.0), itemp=1,points_left) /)
 
-    x_array(points_left:points_left+41) = &
+    RadGridX_C(points_left:points_left+41) = &
         (/ ( -2.0 + res_mid*(itemp-points_left), &
         itemp=points_left,points_left+41) /)
 
-    x_array(points_left+41:size_3d_i) = &
+    RadGridX_C(points_left+41:nRadGridX) = &
         (/ ( 2.0 + res_right*(itemp -(points_left+40)), &
-        itemp=points_left+41,size_3d_i) /)
+        itemp=points_left+41,nRadGridX) /)
 
-    ! === y-axis ====
-    length_left  = -2.0 - y1
-    length_right = y2 - 2.0
+    ! >>> y-axis <<<
+    length_left  = -2.0 - yMinBox
+    length_right = yMaxBox - 2.0
 
-    points_right = int(length_right*(size_3d_j+2-41)/(length_left+length_right))
-    points_left  = size_3d_j+2-41 - points_right
+    points_right = int(length_right*(nRadGridY+2-41)/(length_left+length_right))
+    points_left  = nRadGridY+2-41 - points_right
 
     res_left  = length_left/(points_left-1)
     res_right = length_right/(points_right-1)
 
-    y_array(1:points_left) = &
-        (/ ( y1 + res_left*(itemp-1.0), itemp=1,points_left) /)
+    RadGridY_C(1:points_left) = &
+        (/ ( yMinBox + res_left*(itemp-1.0), itemp=1,points_left) /)
 
-    y_array(points_left:points_left+41) = &
+    RadGridY_C(points_left:points_left+41) = &
         (/ ( -2. + res_mid*(itemp-points_left), &
         itemp=points_left,points_left+41) /)
 
-    y_array(points_left+41:size_3d_j) = &
+    RadGridY_C(points_left+41:nRadGridY) = &
         (/ ( 2. + res_right*(itemp -(points_left+40)), &
-        itemp=points_left+41,size_3d_j) /)
+        itemp=points_left+41,nRadGridY) /)
 
-    ! === z-axis ===
-    length_left  = -2.0 - z1
-    length_right = z2 - 2.0
+    ! >>> z-axis <<<
+    length_left  = -2.0 - zMinBox
+    length_right = zMaxBox - 2.0
 
-    points_right = int(length_right*(size_3d_k+2-41)/(length_left+length_right))
-    points_left  = size_3d_k+2-41 - points_right
+    points_right = int(length_right*(nRadGridZ+2-41)/(length_left+length_right))
+    points_left  = nRadGridZ+2-41 - points_right
 
     res_left  = length_left/(points_left-1)
     res_right = length_right/(points_right-1)
 
-    z_array(1:points_left) = &
-        (/ ( z1 + res_left*(itemp-1.0), itemp=1,points_left) /)
+    RadGridZ_C(1:points_left) = &
+        (/ ( zMinBox + res_left*(itemp-1.0), itemp=1,points_left) /)
 
-    z_array(points_left:points_left+41) = &
+    RadGridZ_C(points_left:points_left+41) = &
         (/ ( -2.0 + res_mid*(itemp-points_left), &
         itemp=points_left,points_left+41) /)
 
-    z_array(points_left+41:size_3d_k) = &
+    RadGridZ_C(points_left+41:nRadGridZ) = &
         (/ ( 2.0 + res_right*(itemp -(points_left+40)), &
-        itemp=points_left+41,size_3d_k) /)
+        itemp=points_left+41,nRadGridZ) /)
 
-  end subroutine make_uniform_rtgrid
-
-!==============================================================================
-! Initialisation of the uniform grid of density and optical depth that will be
-! used in the first instance of user_calc_sources.
-!==============================================================================
-  subroutine init_uniform_rho_grid
-
-    use ModPhysics, ONLY: BodyRhoSpecies_I
-
-    implicit none
-
-    ! Local variables
-    integer :: i, j, k
-    real    :: r_vel, radius
-
-    do k = 1,size_3d_k; do j = 1,size_3d_j; do i = 1,size_3d_i
-      radius = sqrt(x_array(i)**2 + y_array(j)**2 + z_array(k)**2)
-
-      if (radius <= 1.0) then
-        array_3d_dens(i,j,k) = BodyRhoNeuSpecies
-        cycle
-      end if
-
-      r_vel = (Vrad0Pw / (VinfPw*(1.0 - 1.0/radius)**BetaIndex)) &
-          * (1.0/radius)**2
-     array_3d_dens(i,j,k) = r_vel * BodyRhoNeuSpecies
-   enddo; enddo; enddo
-
-    ! This will create my initial array of tau
-    call create_uniform_3d_grid_tau()
-
-    ! Reset for next timestep
-    array_3d_dens(1:size_3d_i,1:size_3d_j,1:size_3d_k) = 0.0
-
-  end subroutine init_uniform_rho_grid
+  end subroutine make_uniform_radiation_grid
 
 !==============================================================================
-! Interpolate the values of density from the AMR grid to the uniform grid. The
-! computation is performed on the MHD grid spanned by each individual block.
-! The densities for the entire grid are computed in ModBatsrusMethods.f90.
+! Interpolate the values of density from the AMR grid to the radiation grid.
+! Computation is performed on the MHD grid spanned by each individual block.
 !==============================================================================
-  subroutine create_uniform_3d_grid_rho(iBlock)
+  subroutine interp_neutrals_to_radiation_grid(iBlock)
 
     use ModVarIndexes,  ONLY: H1Rho_
     use ModPhysics,     ONLY: rBody
@@ -1433,113 +1294,115 @@ contains
 
     ! Local variables
     integer :: i, j, k, iMinX, iMaxX, iMinY, iMaxY, iMinZ, iMaxZ
-    logical :: DoExtrapolate=.true.
+    !--------------------------------------------------------------------------
 
     ! Instead of looping through all i,j,k only loop through the indices
     ! that will be interpolated in this block
 
-    ! Minimum index where x_array > x_min_iblock
-    iMinX = minloc(x_array, 1, mask = x_array > CoordMin_DB(x_, iBlock))
+    ! Minimum index where RadGridX_C > x_min_iblock
+    iMinX = minloc(RadGridX_C, 1, mask = RadGridX_C > CoordMin_DB(x_, iBlock))
 
-    ! Maximum index where x_array <= x_max_iblock
-    iMaxX = maxloc(x_array, 1, mask = x_array <= CoordMax_DB(x_, iBlock))
+    ! Maximum index where RadGridX_C <= x_max_iblock
+    iMaxX = maxloc(RadGridX_C, 1, mask = RadGridX_C <= CoordMax_DB(x_, iBlock))
 
     ! Same procedure for y,z direction
-    iMinY = minloc(y_array, 1, mask = y_array > CoordMin_DB(y_, iBlock))
-    iMaxY = maxloc(y_array, 1, mask = y_array <= CoordMax_DB(y_, iBlock))
-    iMinZ = minloc(z_array, 1, mask = z_array > CoordMin_DB(z_, iBlock))
-    iMaxZ = maxloc(z_array, 1, mask = z_array <= CoordMax_DB(z_, iBlock))
+    iMinY = minloc(RadGridY_C, 1, mask = RadGridY_C > CoordMin_DB(y_, iBlock))
+    iMaxY = maxloc(RadGridY_C, 1, mask = RadGridY_C <= CoordMax_DB(y_, iBlock))
+    iMinZ = minloc(RadGridZ_C, 1, mask = RadGridZ_C > CoordMin_DB(z_, iBlock))
+    iMaxZ = maxloc(RadGridZ_C, 1, mask = RadGridZ_C <= CoordMax_DB(z_, iBlock))
 
     do k = iMinZ,iMaxZ; do j = iMinY,iMaxY; do i = iMinX,iMaxX
 
       ! No interpolation inside planet
-      if (sqrt(x_array(i)**2 + y_array(j)**2 + z_array(k)**2) <= rBody) then
-        array_3d_dens(i,j,k) = BodyRhoNeuSpecies
+      if (sqrt(RadGridX_C(i)**2 + RadGridY_C(j)**2 + RadGridZ_C(k)**2) &
+           <= rBody) then
+        RhoRadGrid_C(i,j,k) = BodyRhoNeuSpecies
         CYCLE
       endif
 
-      ! There are two ways of interpolating: considering the ghost cells or not
-      array_3d_dens(i,j,k) =                                                 &
+      ! Interpolate hydro neutrals to radiation grid
+      RhoRadGrid_C(i,j,k) = &
         interpolate_scalar(State_VGB(H1Rho_,:,:,:,iBlock),                   &
-      	                   3, (/MinI, MinJ, MinK/), (/MaxI, MaxJ, MaxK/),    &
-                           (/x_array(i), y_array(j), z_array(k)/),           &
+                           3, [ MinI, MinJ, MinK ], [ MaxI, MaxJ, MaxK ],    &
+                           [ RadGridX_C(i), RadGridY_C(j), RadGridZ_C(k) ],  &
                            Xyz_DGB(x_,MinI:MaxI,1        ,1        ,iBlock), &
                            Xyz_DGB(y_,1        ,MinJ:MaxJ,1        ,iBlock), &
                            Xyz_DGB(z_,1        ,1        ,MinK:MaxK,iBlock), &
-                           DoExtrapolate)
-    enddo; enddo; enddo ! loop in ijk
+                           DoExtrapolate=.true.)
+    enddo; enddo; enddo
 
-  end subroutine create_uniform_3d_grid_rho
+  end subroutine interp_neutrals_to_radiation_grid
 
 !==============================================================================
 ! Calculate the sum over n(Hydrogen) to get optical depth. This subroutine is
-! called from ModBatsrusMethods.f90 after message passing to iProc=0. Thus,
-! the value of array_3d_Exp_mTau is only complete for iProc=0.
+! called after message passing to iProc=0. Thus, the optical depth grid is only
+! complete for iProc=0.
 !==============================================================================
-  subroutine create_uniform_3d_grid_tau
+  subroutine calc_tau_radiation_grid
 
-    use ModVarIndexes, ONLY: H1Rho_
-    use ModPhysics,    ONLY: No2Si_V, No2Io_V, UnitX_, UnitN_
+    use ModPhysics, ONLY: No2Si_V, No2Io_V, UnitX_, UnitN_
 
     implicit none
 
     ! Local variables
     integer :: idum
-    real    :: cell_size, array_3d_tau(size_3d_i, size_3d_j, size_3d_k), cTau
+    real    :: CellSizeX, TauRadGrid_C(nRadGridX, nRadGridY, nRadGridZ), cTau
+    !--------------------------------------------------------------------------
 
-    ! Constant optical depth (factor 100 is to go from m to cm)
-    cTau = SigmaNu0Cgs * No2Io_V(UnitN_) * 1e2 * No2Si_V(UnitX_)
+    ! Constant optical depth (factor 100 is to go from m -> cm)
+    cTau = SigmaNu0Cgs * No2Io_V(UnitN_) * 100.0*No2Si_V(UnitX_)
 
-    ! Summing density in all cells along x to get optical depth
+  	! Summing density in all cells along x to get optical depth
     ! This is zero in the first point, at the left edge of the grid
-    array_3d_tau(1,:,:) = array_3d_dens(1,:,:) * (x_array(2) - x_array(1))
+    TauRadGrid_C(1,:,:) = RhoRadGrid_C(1,:,:) * (RadGridX_C(2) - RadGridX_C(1))
 
-    do idum = 2,size_3d_i
-      cell_size = x_array(idum) - x_array(idum-1)
-      array_3d_tau(idum,:,:) = array_3d_dens(idum,:,:) * cell_size &
-           + array_3d_tau(idum-1,:,:)
+    do idum = 2,nRadGridX
+      CellSizeX = RadGridX_C(idum) - RadGridX_C(idum-1)
+      TauRadGrid_C(idum,:,:) = RhoRadGrid_C(idum,:,:) * CellSizeX &
+           + TauRadGrid_C(idum-1,:,:)
     enddo
 
     ! Normalisation of optical depth
-    array_3d_tau      = array_3d_tau * cTau/MassNeuSpecies
-    array_3d_Exp_mTau = exp(-array_3d_tau)
+    TauRadGrid_C    = TauRadGrid_C * cTau/MassNeuSpecies
+    ExpTauRadGrid_C = exp(-TauRadGrid_C)
 
-  end subroutine create_uniform_3d_grid_tau
+  end subroutine calc_tau_radiation_grid
 
 !==============================================================================
 ! Print some extra information of interest to the screen when called for.
 !==============================================================================
   subroutine print_model_info
 
-    use ModMain,        ONLY: IsStandAlone, UseRotatingFrame, UseRotatingBC, &
+    use ModMain,         ONLY: IsStandAlone, UseRotatingFrame, UseRotatingBC, &
          UseRayTrace
-    use ModVarIndexes,  ONLY: HpRho_, H1Rho_, ScalarFirst_, ScalarLast_, &
+    use ModVarIndexes,   ONLY: HpRho_, H1Rho_, ScalarFirst_, ScalarLast_, &
          PaSc_, MassFluid_I
-    use ModPhysics,     ONLY: No2Si_V, No2Io_V, UnitX_, UnitRho_, UnitU_, &
+    use ModPhysics,      ONLY: No2Si_V, No2Io_V, UnitX_, UnitRho_, UnitU_, &
          UnitN_, UnitP_, UnitB_, UnitMass_, UnitT_, UnitRhoU_, UnitJ_,    &
          UnitDivB_, UnitAngle_, UnitTemperature_, UnitEnergyDens_,        &
          UnitElectric_, UnitPoynting_, BodyRhoSpecies_I, BodyRho_I,       &
          BodyNDim_I, BodyP_I, rPlanetSi, RotPeriodSi, OmegaBody
-    use ModGeometry,    ONLY: TypeGeometry
-    use ModAdvance,     ONLY: UseNonConservative
-    use ModPlanetConst, ONLY: mPlanet_I, rPlanet_I, Jupiter_
-    use CON_planet,     ONLY: MassPlanet
-    use ModConst,       ONLY: cSecondPerDay
-    use ModIO,          ONLY: restart
+    use ModGeometry,     ONLY: TypeGeometry
+    use ModConservative, ONLY: UseNonConservative
+    use ModPlanetConst,  ONLY: mPlanet_I, rPlanet_I, Jupiter_
+    use CON_planet,      ONLY: MassPlanet
+    use ModConst,        ONLY: cSecondPerDay
+    use ModIO,           ONLY: IsRestart
+    !--------------------------------------------------------------------------
 
     if (UseNonConservative) &
          call stop_mpi('Only runs with conservative energy formulation!')
 
     if (Mstar == 0.0) &
          call stop_mpi('Missing #USR_SYSTEMPROPERTIES in PARAM.in. &
-         Maybe due to a restart of the code?')
+         Maybe due to a IsRestart of the code?')
 
     if (FxuvCgs == 0.0) call stop_mpi('Missing #USR_FXUV in PARAM.in. &
-         Maybe due to a restart of the code?')
+         Maybe due to a IsRestart of the code?')
 
     if (UseStellarWind .and. NameStar == 'empty') &
          call stop_mpi('Missing #USR_INJECT_SW in PARAM.in. &
-         Maybe due to a restart of the code?')
+         Maybe due to a IsRestart of the code?')
 
     write(*,'(2X, A)') ' **** Planetary properties:'
     write(*,'(5X,A23,ES10.3,A10)') 'Rplanet = ', rPlanetSi, ' m'
@@ -1579,11 +1442,10 @@ contains
     write(*,'(5X,A23,es10.3,A10)') 'BodyRho_I(fluid=1)  = ', BodyRho_I(1),' '
     write(*,'(5X,A23,es10.3,A10)') 'BodyP_I(fluid=1) = ', BodyP_I(1),' '
 
-    write(*,'(5X,A23,i10)') 'size_3d_i = ', size_3d_i
-    write(*,'(5X,A23,i10)') 'size_3d_j = ', size_3d_j
-    write(*,'(5X,A23,i10)') 'size_3d_k = ', size_3d_k
+    write(*,'(5X,A23,i10)') 'nRadGridX = ', nRadGridX
+    write(*,'(5X,A23,i10)') 'nRadGridY = ', nRadGridY
+    write(*,'(5X,A23,i10)') 'nRadGridZ = ', nRadGridZ
     write(*,'(2X, A)') ' '
-    ! NOTE: rPlanetSi, MassBodySi, and RotPeriodSi are read in #PLANET
 
     write(*,'(2X, A)') ' **** Normalisation variables:'
     write(*,'(5X,A23,ES10.3)') 'No2Si_V(UnitX_) = '  , No2Si_V(UnitX_)
@@ -1619,7 +1481,7 @@ contains
     write(*,*) 'UseRotatingFrame   = ', UseRotatingFrame
     write(*,*) 'UseRotatingBC      = ', UseRotatingBC
     write(*,*) 'UseNonConservative = ', UseNonConservative
-    write(*,*) 'Restart            = ', restart
+    write(*,*) 'Restart            = ', IsRestart
     write(*,*) 'TypeGeometry       = ', TypeGeometry
     write(*,*) 'UseRaytrace        = ', UseRaytrace
     write(*,'(2X, A)') ' '
