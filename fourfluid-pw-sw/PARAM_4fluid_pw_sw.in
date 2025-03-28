@@ -1,0 +1,253 @@
+!\
+! This PARAM.in is to be used with ModUserHotJupiter4Fluids.f90 to perform
+! multi-fluid simulations with(out) planetary magnetic fields.
+!
+! Works with BATSRUS Stand Alone installation v9.20.
+!/
+
+!>
+!> SESSION 1: init simulation and make grid with AMR
+!>
+
+#ECHO
+T                       DoEcho
+
+#COMPONENT
+GM
+
+#COORDSYSTEM
+GSE                     TypeCoordSystem
+
+INCLUDE
+GM/restartIN/restart.H
+
+#INCLUDE
+GRID.in
+
+#TIMEACCURATE
+F                       DoTimeAccurate
+
+#PLOTDIR
+GM/IO2
+
+#BODY
+T                       UseBody
+1.0                     rBody [user units]
+3.5                     rCurrents [only read for GM component]
+1e-1                    BodyNDim for SwH+ [/cc]
+1e3                     BodyTDim for SwH+ [K]
+2.39e6                  BodyNDim for PwH+ [/cc]
+1e3                     BodyTDim for PwH+ [K]
+1e-1                    BodyNdim for SwH1 [/cc]
+1e3                     BodyTdim for SwH1 [K]
+2.39e11                 BodyNdim for PwH1 [/cc]
+1e3                     BodyTdim for PwH1 [K]
+
+#GRAVITY
+T                       UseGravity
+0                       iDirGravity
+
+#PLANET
+New                     NamePlanet
+9.79e7                  RadiusPlanet [m]
+1.33e27                 MassPlanet [kg]
+0.0                     OmegaPlanet [rad/s]
+0.0                     TiltRotation
+NONE                    TypeBField (NONE or DIPOLE)
+0.0                     MagAxisThetaGeo [deg]
+0.0                     MagAxisPhiGeo [deg]
+0.5e-4                  DipoleStrength [T]
+
+#IDEALAXES
+! align rotation and magnetic axes with z axis
+
+#PLASMA
+1.0                     FluidMass SwH+ [amu]
+1.0                     FluidMass PwH+ [amu]
+1.0                     FluidMass SwH1 [amu]
+1.0                     FluidMass PwH1 [amu]
+1.0                     IonCharge SwH+ [e]
+1.0                     IonCharge PwH+ [e]
+1.0                     EletronTemperatureRatio (Telectron=Tratio*Tion)
+
+#NEUTRALFLUID
+F                       DoConserveNeutrals
+Linde                   TypeFluxNeutral
+
+#GAMMA
+1.01                    Gamma for fluid 1 (SwHp)
+5/3                     Gamma for fluid 2 (PwHp)
+1.01                    Gamma for fluid 3 (SwH1)
+5/3                     Gamma for fluid 4 (PwH1)
+5/3                     Gamma for electrons
+
+#IOUNITS
+USER
+
+#NORMALIZATION
+USER
+
+#MINIMUMDENSITY
+1.0E-30                 RhoMinDim for fluid 1 - in IO units (g/cm3)
+1.0E-30                 RhoMinDim for fluid 2
+1.0E-30                 RhoMinDim for fluid 3
+1.0E-30                 RhoMinDim for fluid 4
+
+#MINIMUMTEMPERATURE
+500.0                   TMinDim for fluid 1 - in K
+500.0                   TMinDim for fluid 2
+500.0                   TMinDim for fluid 3
+500.0                   TMinDim for fluid 4
+500.0                   TeMinDim for electrons
+
+#INNERBOUNDARY
+user                    TypeBcBody
+
+#OUTERBOUNDARY
+userfloat               TypeBcEast
+userfloat               TypeBcWest
+userfloat               TypeBcSouth
+userfloat               TypeBcNorth
+userfloat               TypeBcBottom
+userfloat               TypeBcTop
+
+#USERFLAGS
+T                       UseUserInnerBcs
+T                       UseUserSource
+F                       UseUserPerturbation
+T                       UseUserOuterBcs
+T                       UseUserICs
+F                       UseUserSpecifyRefinement
+F                       UseUserLogFiles
+T                       UseUserWritePlot
+F                       UseUserAMR
+T                       UseUserEchoInput
+F                       UseUserB0
+T                       UseUserInitSession
+T                       UseUserUpdateStates
+
+#USERINPUTBEGIN -----------------------------------
+
+! usr_systemproperties does not need to be in each USERINPUTBEGIN, but is required after a restart
+#USR_SYSTEMPROPERTIES
+1.148                   Mstar [Msun]
+1.19                    Rstar [Rsun]
+0.05                    RorbitAu [au] - orbital distance
+
+#USR_FXUV
+500.0                   FxuvCgs [erg/cm2/s] - incident flux left edge grid
+20.0                    EphotEv - incident radiation in eV
+
+#USR_INIT_PL_ATM
+0.00087279              Vrad0Pw [km/s]
+42.93184989058604       VinfPw [km/s]
+3.660825544695265       BetaIndex
+
+#USR_SOURCES
+F                       UseCoriolis
+F                       UseTidal
+
+#USERINPUTEND -------------------------------------
+
+#NONCONSERVATIVE
+T                       UseNonConservative
+
+#SCHEME
+2                       nOrder (1 or 2)
+Linde                   TypeFlux (fluxfcn_type 1=Roe, 2=Rusanov, 3=Linde)
+minmod                  TypeLimiter (limiter_type mc or minmod)
+
+#TIMESTEPPING
+2                       nStage (1 or 2)
+0.80                    CflExpl
+
+#POINTIMPLICIT
+T                       UsePointImplicit
+1.0                     BetaPointImplicit
+F                       IsAsymmetric
+F                       DoNormalizeCell
+
+DIVB
+T                       UseDivbSource
+F                       UseDivbDiffusion
+F                       UseProjection
+F                       UseConstrainB
+
+#SAVERESTART
+T                       DoSaveRestart
+1000                    DnSaveRestart
+-1.                     DtSaveRestart
+
+#SAVEINITIAL
+T                       DoSaveIntial
+
+#SAVEPLOT
+1                       nPlotFiles
+z=0 VAR tec             StringPlot
+5                       DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+
+#STOP
+10                      MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+!>
+!> SESSION 2: relax planetary wind for given stellar flux
+!>
+
+#DOAMR
+F                       DoAmr
+
+#SAVEPLOT
+1                       nPlotFiles
+z=0 VAR tec             StringPlot
+400                     DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+
+#SAVELOGFILE
+T                       DoSaveLogfile
+VAR                     Stringlog
+400                     DnSaveLogfile
+-1                      DtSaveLogfile
+HpRhoflx H1Rhoflx       NameLogVars
+1.2 4.0 8.0 12.0 15.0   rLog
+
+#STOP
+8000                    MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+!>
+!> SESSION 3: add source terms for orbital and tidal motions
+!>
+
+#USERINPUTBEGIN -----------------------------------
+
+#USR_SOURCES
+T                       UseCoriolis
+T                       UseTidal
+
+#USERINPUTEND -------------------------------------
+
+#SAVEPLOT
+1                       nPlotFiles
+z=0 VAR tec             StringPlot
+800                     DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat cool rion rrec   NameVars
+{default}               NamePars
+
+#STOP
+16000                   MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+#END

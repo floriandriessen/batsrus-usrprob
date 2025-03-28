@@ -25,5 +25,7 @@ The remaining problems are all **unpublished work**. Most are still in a develop
 
 - Four-fluid ideal MHD including electron pressure evolution (`fourfluid-pe-helium`). Evolves hydrogen and helium ions and neutrals as separate fluids including the electron pressure as an additional hydro equation. It served to test whether collisional decoupling and atmospheric fractionation happened. It was inspired by the work of [Xing, Yan, & Guo (2023)](https://iopscience.iop.org/article/10.3847/1538-4357/ace43f) that ran 1-D hydrogen-helium multi-fluid models with the PLUTO code. Beware that this user problem is only tested during development and some erratic behaviour developed. Particularly, the helium neutrals show inflow onto the planet from a large distance. Further investigation is warranted on what causes it.
 
+- Four-fluid ideal MHD of stellar and planetary wind (`fourfluid-pw-sw`). Evolves hydrogen ions and neutrals as separate fluids for both the stellar and planetary wind. Its purpose is to provide a more self-consistent injection of the stellar wind into the grid by assigning a polytrope index to the stellar wind fluid and an adiabatic index to the planetary fluid. The problem was still in development and only the injection of the stellar fluid with proper boundary conditions was tested. For this reason it does also not couple (via collisions) the stellar and planetary fluid and such source terms have to be included.
+
 
 
