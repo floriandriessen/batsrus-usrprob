@@ -1,0 +1,268 @@
+!\
+! This PARAM.in is to be used with ModUserMultiSpecies.f90 to perform
+! multi-species simulations with(out) planetary magnetic fields.
+! Species included: H+, H1.
+!
+! Works with BATSRUS Stand Alone installation v9.20.
+!/
+
+!>
+!> SESSION 1: init simulation and make grid with AMR
+!>
+
+#ECHO
+T                       DoEcho
+
+#COMPONENT
+GM
+
+#COORDSYSTEM
+GSE                     TypeCoordSystem
+
+#INCLUDE
+GRID.in
+
+#TIMEACCURATE
+F                       DoTimeAccurate
+
+#PLOTDIR
+GM/IO2
+
+#BODY
+T                       UseBody
+1.0                     rBody [user units]
+3.5                     rCurrents [only read for GM component]
+2.3909e06               BodyNDim [/cc] number density proton
+1e3                     BodyTDim [K]
+
+#GRAVITY
+T                       UseGravity
+0                       iDirGravity
+
+#PLANET
+HD209458                NamePlanet
+9.79e7                  RadiusPlanet [m]
+1.33e27                 MassPlanet [kg]
+0.0                     OmegaPlanet [rad/s]
+0.0                     TiltRotation
+NONE                    TypeBField (NONE or DIPOLE)
+0.0                     MagAxisThetaGeo [deg]
+0.0                     MagAxisPhiGeo [deg]
+0.5e-4                  DipoleStrength [T]
+
+IDEALAXES
+! align rotation and magnetic axes with z axis
+
+#PLASMA
+1.0                     MassSpecies 1 (proton) [cProtonMass]
+1.0                     Charge species 1 (proton) [e]
+1.0                     ElectronTemperatureRatio
+
+#GAMMA
+5/3                     Gamma for fluid
+
+#IOUNITS
+USER
+
+#NORMALIZATION
+USER
+
+#MINIMUMPRESSURE
+1e-20                   pMinDim for fluid - in IO units (dyn/cm2)
+
+#MINIMUMTEMPERATURE
+500.0                   TMinDim for fluid - in K
+
+#INNERBOUNDARY
+user                    TypeBcBody
+
+#OUTERBOUNDARY
+userfloat               TypeBcEast   (or userInjectSW)
+userfloat               TypeBcWest
+userfloat               TypeBcSouth
+userfloat               TypeBcNorth
+userfloat               TypeBcBottom
+userfloat               TypeBcTop
+
+#USERFLAGS
+T                       UseUserInnerBcs
+T                       UseUserSource
+F                       UseUserPerturbation
+T                       UseUserOuterBcs
+T                       UseUserICs
+F                       UseUserSpecifyRefinement
+F                       UseUserLogFiles
+T                       UseUserWritePlot
+F                       UseUserAMR
+T                       UseUserEchoInput
+F                       UseUserB0
+T                       UseUserInitSession
+T                       UseUserUpdateStates
+
+#USERINPUTBEGIN -----------------------------------
+
+usr_systemproperties does not need to be in each USERINPUTBEGIN,
+but is required after a restart
+
+#USR_SYSTEMPROPERTIES
+1.148                   Mstar [Msun]
+1.19                    Rstar [Rsun]
+0.05                    RorbitAu [au] - orbital distance
+
+#USR_FXUV
+500.0                   FxuvCgs [erg/cm2/s] - incident flux left edge grid
+20.0                    EphotEv - incident radiation in eV
+
+#USR_INIT_PL_ATM
+0.00087279              Vrad0Pw [km/s]
+42.93184989058604       VinfPw [km/s]
+3.660825544695265       BetaIndex
+
+#USR_SOURCES
+F                       UseCoriolis
+F                       UseTidal
+
+#USR_INJECT_SW
+F                       UseStellarWind - below only read if T
+generic_sunlike_1MK     NameStar
+2e-13                   SwMdot [Msun/yr]
+1e6                     SwTemperature [K]
+none                    SwTypeBfield - none, radial, aligned_dipole
+2.0                     B0Star [G]
+
+#USERINPUTEND -------------------------------------
+
+#NONCONSERVATIVE
+F                       UseNonConservative
+
+#SCHEME
+2                       nOrder (1 or 2)
+Linde                   TypeFlux (fluxfcn_type 1=Roe, 2=Rusanov, 3=Linde)
+minmod                  TypeLimiter (limiter_type mc or minmod)
+
+#TIMESTEPPING
+2                       nStage (1 or 2)
+0.80                    CflExpl
+
+#DIVB
+T                       UseDivbSource
+F                       UseDivbDiffusion
+F                       UseProjection
+F                       UseConstrainB
+
+#SAVERESTART
+T                       DoSaveRestart
+1000                    DnSaveRestart
+-1.                     DtSaveRestart
+
+#SAVEINITIAL
+T                       DoSaveIntial
+
+#SAVEPLOT
+1                       nPlotFiles
+z=0 VAR tec             StringPlot
+5                       DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+
+#STOP
+10                      MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+!>
+!> SESSION 2: relax planetary wind for given stellar flux
+!>
+
+#DOAMR
+F                       DoAmr
+
+#SAVEPLOT
+1                       nPlotFiles
+z=0 VAR tec             StringPlot
+400                     DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+
+#SAVELOGFILE
+T                       DoSaveLogfile
+VAR                     Stringlog
+400                     DnSaveLogfile
+-1                      DtSaveLogfile
+Rhoflx                  NameLogVars
+1.2 4.0 8.0 12.0 15.0 20.0   rLog
+
+#STOP
+4000                    MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+!>
+!> SESSION 3: add source terms for orbital and tidal motions
+!>
+
+#USERINPUTBEGIN -----------------------------------
+
+#USR_SOURCES
+T                       UseCoriolis
+T                       UseTidal
+
+#USERINPUTEND -------------------------------------
+
+#STOP
+8000                    MaxIteration
+-1.                     tSimulationMax
+
+#RUN   ########################################################################
+
+!>
+!> SESSION 4: add stellar wind in left boundary and let system evolve
+!>
+
+#USERINPUTBEGIN -----------------------------------
+
+#USR_INJECT_SW
+T                       UseStellarWind - below only read if T
+generic_sunlike_1MK     NameStar
+2e-13                   SwMdot [Msun/yr]
+1e6                     SwTemperature [K]
+none                    SwTypeBfield - none, radial, aligned_dipole
+2.0                     B0Star [G]
+
+#USERINPUTEND -------------------------------------
+
+#OUTERBOUNDARY
+userInjectSW            TypeBcEast
+userfloat               TypeBcWest
+userfloat               TypeBcSouth
+userfloat               TypeBcNorth
+userfloat               TypeBcBottom
+userfloat               TypeBcTop
+
+#SAVEPLOT
+3                       nPlotFiles
+z=0 VAR tec             StringPlot
+400                     DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+y=0 VAR tec             StringPlot
+400                     DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+3d VAR tec              StringPlot
+10000                   DnSavePlot
+-1                      DtSavePlot
+{MHD} tau heat ccoll clya rion rrec   NameVars
+{default}               NamePars
+
+#STOP
+12000                   MaxIteration
+-1.                     tSimulationMax
+
+#END
